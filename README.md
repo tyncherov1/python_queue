@@ -74,9 +74,7 @@ queue_python/
 │           ├── styles.css     # Тёмная тема и адаптивность
 │           └── app.js         # Синхронизация таймера, звонок Web Audio API, управление
 ├── students.csv               # Таблица 32 учеников (редактируется в Excel / Google Sheets)
-├── run.py                     # Локальный запуск (`python run.py`)
-├── Dockerfile                 # Контейнер для Hugging Face Spaces / Koyeb / VPS
-├── render.yaml                # Готовый Blueprint для бесплатного деплоя на Render.com
+├── run.py                     # Запуск приложения (`python run.py`)
 ├── requirements.txt           # Зависимости Python
 ├── .env.example               # Шаблон конфигурации
 └── tests/
@@ -137,57 +135,47 @@ BOARD_PIN=1234
 - Чтобы дать ученику/старосте права админа, поставьте `admin` в колонке `role` (или добавьте ID в `ADMIN_IDS`).
 - После правки файла во время работы бота просто нажмите `📄 Перечитать CSV` в `/admin` (или отправьте `/reload`).
 
-### 5. Запуск (Linux и Windows)
+### 5. Запуск
 
-**На Linux (домашний хост / сервер):**
 ```bash
-chmod +x start.sh start_tunnel.sh
-./start.sh
+python run.py
 ```
-Для публичного HTTPS-адреса на электронную доску запустите в соседнем терминале `./start_tunnel.sh` (или настройте фоновый автозапуск через [`seminar-queue.service.example`](seminar-queue.service.example)).
-
-**На Windows:**
-Достаточно дважды кликнуть по **`start.bat`** (и **`start_tunnel.bat`** для туннеля) — скрипт сам создаст `.venv`, установит зависимости и запустит сервер.
 
 Локальный адрес доски: **http://localhost:8000**
 
 ---
 
-## ☁️ Где захостить всё это БЕСПЛАТНО
+## ☁️ Публичный доступ через Cloudflare Tunnel
 
-Так как бот и сайт работают в одном приложении, вам нужен всего **один** бесплатный сервис. Вот 4 лучших варианта:
+Чтобы открыть электронную доску по публичному HTTPS-адресу (например, с интерактивной доски в аудитории или с телефонов учеников), используйте **Cloudflare Tunnel** (`cloudflared`) — регистрация и привязка карты не требуются.
 
-| Площадка | Бесплатный тариф | Сон при простое | Карта нужна? | Лучший режим бота |
-|---|---|---|:---:|---|
-| **Hugging Face Spaces** *(Docker)* | 16 GB RAM, 2 vCPU, HTTPS + WS | Через **48 часов** | ❌ Нет | `polling` или `webhook` |
-| **Render.com** *(Web Service)* | 512 MB RAM, HTTPS + WS | Через 15 минут | ❌ Нет | `webhook` |
-| **Koyeb** *(Free Web Service)* | 512 MB RAM, HTTPS + WS | При простое | Может потребоваться | `webhook` |
-| **Ноутбук + Cloudflare Tunnel** | Без ограничений, локальная БД | Никогда (пока открыт ПК) | ❌ Нет | `polling` |
+### 1. Установка `cloudflared`
 
-### Вариант 1: Hugging Face Spaces (рекомендуем — не требует карты и почти не засыпает)
-1. Зарегистрируйтесь на [huggingface.co](https://huggingface.co) → **New Space**.
-2. Выберите SDK: **Docker** (Blank), Hardware: **CPU basic (Free)**, видимость: **Public** (чтобы доска открывалась без логина).
-3. Загрузите файлы проекта в репозиторий Space (через git или веб-интерфейс).
-4. В начале файла `README.md` самого Space (или в настройках Space) укажите порт `app_port: 8000` (или задайте в **Settings → Variables & Secrets** переменную `PORT=7860`).
-5. В **Settings → Repository secrets** добавьте `BOT_TOKEN`, `ADMIN_IDS`, `BOARD_PIN` (а в Variables — `DEFAULT_TIMER_MINUTES=7`, `BOT_MODE=polling`).
-6. После сборки доска будет доступна по постоянному HTTPS-адресу `https://<логин>-<space>.hf.space`!
+**Windows (PowerShell):**
+```powershell
+winget install --id Cloudflare.cloudflared
+```
 
-### Вариант 2: Render.com (деплой за 2 минуты по `render.yaml`)
-1. Залейте проект в свой репозиторий на GitHub (убедитесь, что `.env` в `.gitignore` и НЕ попал в репозиторий!).
-2. Зайдите на [render.com](https://render.com) → **New → Blueprint** → подключите репозиторий.
-3. Render автоматически прочитает [`render.yaml`](render.yaml) и предложит ввести `BOT_TOKEN` и `ADMIN_IDS`.
-4. Нажмите **Apply**. Переменная `RENDER_EXTERNAL_URL` подставится сама — бот автоматически включится в режиме `webhook`.
-5. **Лайфхак от засыпания**: во время семинара открытая страница доски сама шлёт WebSocket-пинг каждые 25 секунд и не даёт серверу уснуть. Чтобы бот отвечал мгновенно даже до открытия доски, добавьте бесплатный монитор на [cron-job.org](https://cron-job.org) или [UptimeRobot](https://uptimerobot.com), который раз в 10 минут дергает `https://<ваш-сайт>.onrender.com/health`.
+**Linux (Debian / Ubuntu):**
+```bash
+curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -o /tmp/cloudflared.deb && sudo dpkg -i /tmp/cloudflared.deb
+```
 
-### Вариант 3: Запуск прямо на ноутбуке преподавателя (0 настроек хостинга)
-Если на семинаре есть ноутбук, подключённый к доске/проектору:
-1. Просто запустите `python run.py` и откройте `http://localhost:8000` на весь экран (`F`).
-2. Telegram-бот работает в режиме `polling` через обычный интернет/раздачу с телефона — **никакой хостинг вообще не нужен**!
-3. Если хотите, чтобы ученики могли ещё и смотреть сайт с телефонов, выполните в соседнем окне:
+**macOS (Homebrew):**
+```bash
+brew install cloudflared
+```
+
+### 2. Запуск туннеля
+
+1. Запустите приложение (`python run.py`), чтобы сервер работал на `http://localhost:8000`.
+2. В соседнем терминале запустите туннель:
    ```bash
    cloudflared tunnel --url http://localhost:8000
    ```
-   Cloudflare мгновенно выдаст бесплатный временный HTTPS-адрес.
+3. В консоли появится временный публичный HTTPS-адрес вида `https://<случайное-имя>.trycloudflare.com` — скопируйте его и откройте на электронной доске (кнопка `F` — полный экран) или передайте ученикам.
+
+> 💡 Telegram-бот при этом работает в режиме `polling` и продолжает отвечать через обычное интернет-соединение, пока запущен сервер.
 
 ---
 
