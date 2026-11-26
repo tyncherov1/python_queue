@@ -512,12 +512,36 @@ async def test_max_active_slots_undo_csv_export_and_broadcast(tmp_path: Path) ->
         assert not third.ok
         assert "максимум мест" in third.message
 
+        # Admin using regular join button has the EXACT same restrictions as normal users:
+        # 1) blocked when queue is closed; 2) capped at MAX_ACTIVE_SLOTS;
+        # while admin_insert_student (admin panel) still works!
+        admin = await db.resolve_telegram_user(999001, "prof_admin", "Профессор")
+        assert admin and admin.is_admin
+        await svc.update_settings(queue_open=False)
+        admin_closed = await svc.join_queue(admin)
+        assert not admin_closed.ok
+        assert "приостановлена" in admin_closed.message
+
+        # Admin panel insert works even while queue is closed and beyond MAX_ACTIVE_SLOTS
+        panel_ins = await svc.admin_insert_student(student_id=st1.id, position=1)
+        assert panel_ins.ok
+        # Remove that extra admin-inserted slot before continuing checks
+        assert (await svc.admin_remove_entry(panel_ins.entry.id)).ok
+        await svc.update_settings(queue_open=True)
+
+        assert (await svc.join_queue(admin)).ok
+        assert (await svc.join_queue(admin)).ok
+        admin_third = await svc.join_queue(admin)
+        assert not admin_third.ok
+        assert "максимум мест" in admin_third.message
+        assert (await svc.leave_queue(admin, leave_all=True)).ok
+
         # 2. Broadcast announcement to queue vs full roster
         sent_messages.clear()
         n_queue = await svc.broadcast_announcement("Перерыв 5 минут", scope="queue")
         assert n_queue == 2  # st1 and st2 are in queue (deduplicated!)
         n_all = await svc.broadcast_announcement("Всем привет", scope="all")
-        assert n_all == 3  # st1, st2, st3 all bound telegram_id
+        assert n_all == 4  # st1, st2, st3 + admin all bound telegram_id
 
         # 3. Call next twice (st1 -> active, then st1 -> done & st2 -> active)
         assert (await svc.call_next()).ok

@@ -129,7 +129,7 @@ class QueueService:
         fresh_student = await self.db.get_student_by_id(student.id) or student
         state = await self.db.get_all_state()
         queue_open = state.get("queue_open", "1") == "1"
-        if not queue_open and not fresh_student.is_admin:
+        if not queue_open:
             return ActionResult(
                 ok=False,
                 message="🔒 Запись в очередь сейчас приостановлена преподавателем.",
