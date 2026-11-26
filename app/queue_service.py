@@ -1065,6 +1065,23 @@ class QueueService:
                 logger.debug("Broadcast failed for tg_id=%s: %s", tg_id, exc)
         return sent
 
+    async def notify_admins(self, text: str) -> None:
+        """Send a security or system alert to all configured admins via Telegram."""
+        if self._notifier is None:
+            return
+        admin_tg_ids: set[int] = set(self.settings.admin_ids)
+        try:
+            cur = await self.db.conn.execute(
+                "SELECT telegram_id FROM students WHERE is_admin = 1 AND active_in_roster = 1 AND telegram_id IS NOT NULL"
+            )
+            for row in await cur.fetchall():
+                admin_tg_ids.add(int(row["telegram_id"]))
+        except Exception as exc:
+            logger.debug("Failed to query admin IDs: %s", exc)
+
+        for tg_id in admin_tg_ids:
+            await self._notify(tg_id, text)
+
     async def reload_roster(self) -> int:
         async with self._lock:
             count = await self.db.sync_students_from_csv()

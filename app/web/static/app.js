@@ -9,8 +9,16 @@
     alarmStyle: localStorage.getItem("sq_alarm_style") || "bell",
     volume: Number(localStorage.getItem("sq_volume") || "85"),
     oneMinWarn: localStorage.getItem("sq_one_min_warn") !== "0",
-    pin: localStorage.getItem("sq_pin") || "",
+    token: localStorage.getItem("sq_token") || "",
   };
+  // Migrate away from legacy plaintext sq_pin storage if present
+  const legacySavedPin = localStorage.getItem("sq_pin") || "";
+  if (legacySavedPin) {
+    localStorage.removeItem("sq_pin");
+  }
+
+  let pinLockoutUntilMs = 0;
+  let pinLockoutInterval = null;
 
   // Runtime state synced from server
   let boardState = null;
@@ -107,6 +115,7 @@
 
     pinModal: document.getElementById("pinModal"),
     inputPin: document.getElementById("inputPin"),
+    btnTogglePinVis: document.getElementById("btnTogglePinVis"),
     pinError: document.getElementById("pinError"),
     btnSubmitPin: document.getElementById("btnSubmitPin"),
 
@@ -226,8 +235,8 @@
 
   async function apiRequest(path, method = "POST", body = null) {
     const headers = {};
-    if (prefs.pin) {
-      headers["X-Board-Pin"] = prefs.pin;
+    if (prefs.token) {
+      headers["X-Board-Token"] = prefs.token;
     }
     if (body !== null) {
       headers["Content-Type"] = "application/json";
@@ -239,9 +248,17 @@
     });
     if (resp.status === 403) {
       pinVerified = false;
+      prefs.token = "";
+      localStorage.removeItem("sq_token");
       updateLockUI();
       openPinModal();
-      throw new Error("Требуется PIN-код преподавателя");
+      throw new Error("Требуется пароль преподавателя");
+    }
+    if (resp.status === 429) {
+      const errData = await resp.json().catch(() => ({}));
+      const retrySec = Number(resp.headers.get("Retry-After") || errData.retry_after_sec || 60);
+      startPinLockoutCountdown(retrySec);
+      throw new Error(errData.detail || "Слишком много попыток. Подождите немного.");
     }
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
@@ -864,35 +881,150 @@
     }
   }
 
-  function openPinModal() {
+  function setPinVisibility(show) {
+    el.inputPin.type = show ? "text" : "password";
+    el.btnTogglePinVis.textContent = show ? "🙈" : "👁";
+    el.btnTogglePinVis.classList.toggle("visible", show);
+    el.btnTogglePinVis.setAttribute("aria-pressed", show ? "true" : "false");
+    el.btnTogglePinVis.title = show ? "Скрыть пароль" : "Показать пароль";
+    el.btnTogglePinVis.setAttribute("aria-label", show ? "Скрыть пароль" : "Показать пароль");
+  }
+
+  function updatePinLockoutUI() {
+    const remSec = Math.ceil((pinLockoutUntilMs - Date.now()) / 1000);
+    if (remSec > 0) {
+      const m = Math.floor(remSec / 60);
+      const s = remSec % 60;
+      const clock = `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+      el.inputPin.disabled = true;
+      el.btnSubmitPin.disabled = true;
+      el.pinError.textContent = `🚫 Слишком много неверных попыток. Повторите через ${clock}`;
+      el.pinError.classList.remove("hidden");
+    } else {
+      pinLockoutUntilMs = 0;
+      if (pinLockoutInterval) {
+        clearInterval(pinLockoutInterval);
+        pinLockoutInterval = null;
+      }
+      el.inputPin.disabled = false;
+      el.btnSubmitPin.disabled = false;
+      if (el.pinError.textContent.startsWith("🚫")) {
+        el.pinError.classList.add("hidden");
+      }
+    }
+  }
+
+  function startPinLockoutCountdown(seconds) {
+    if (!seconds || seconds <= 0) return;
+    pinLockoutUntilMs = Date.now() + seconds * 1000;
+    updatePinLockoutUI();
+    if (pinLockoutInterval) clearInterval(pinLockoutInterval);
+    pinLockoutInterval = setInterval(updatePinLockoutUI, 1000);
+  }
+
+  async function openPinModal() {
     el.pinError.classList.add("hidden");
     el.inputPin.value = "";
+    setPinVisibility(false);
     el.pinModal.classList.remove("hidden");
-    setTimeout(() => el.inputPin.focus(), 50);
+
+    // Sync lockout status from server in case this IP is already blocked
+    try {
+      const resp = await fetch("/api/pin/status");
+      if (resp.ok) {
+        const st = await resp.json();
+        if (st.locked && st.retry_after_sec > 0) {
+          startPinLockoutCountdown(st.retry_after_sec);
+          return;
+        }
+      }
+    } catch {
+      // ignore network blip
+    }
+
+    updatePinLockoutUI();
+    if (!el.inputPin.disabled) {
+      setTimeout(() => el.inputPin.focus(), 50);
+    }
+  }
+
+  async function verifySessionToken(token) {
+    if (!token) return false;
+    try {
+      const resp = await fetch("/api/pin/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+      if (!resp.ok) return false;
+      const data = await resp.json();
+      if (data.valid) {
+        pinVerified = true;
+        updateLockUI();
+        if (boardState) renderQueueList(boardState);
+        return true;
+      }
+      prefs.token = "";
+      localStorage.removeItem("sq_token");
+      pinVerified = false;
+      return false;
+    } catch {
+      return false;
+    }
   }
 
   async function verifyPin(pinToCheck, silent = false) {
+    if (!pinToCheck) {
+      if (!silent) {
+        el.pinError.textContent = "Введите пароль";
+        el.pinError.classList.remove("hidden");
+      }
+      return false;
+    }
     try {
+      el.btnSubmitPin.disabled = true;
       const resp = await fetch("/api/pin/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pin: pinToCheck }),
       });
-      const data = await resp.json();
+      const data = await resp.json().catch(() => ({}));
+
+      if (resp.status === 429 || data.locked) {
+        const retrySec = Number(resp.headers.get("Retry-After") || data.retry_after_sec || 900);
+        pinVerified = false;
+        startPinLockoutCountdown(retrySec);
+        return false;
+      }
+
       if (data.valid) {
-        prefs.pin = pinToCheck;
+        prefs.token = data.token || "";
         pinVerified = true;
-        localStorage.setItem("sq_pin", pinToCheck);
+        if (prefs.token) {
+          localStorage.setItem("sq_token", prefs.token);
+        }
         el.pinModal.classList.add("hidden");
+        setPinVisibility(false);
+        el.inputPin.value = "";
         updateLockUI();
         if (boardState) renderQueueList(boardState);
         if (!silent) showToast("🔓 Управление доской разблокировано");
         return true;
       }
+
       pinVerified = false;
-      if (!silent) el.pinError.classList.remove("hidden");
+      el.btnSubmitPin.disabled = false;
+      if (!silent) {
+        el.pinError.textContent =
+          data.detail ||
+          (typeof data.attempts_left === "number"
+            ? `❌ Неверный пароль. Осталось попыток: ${data.attempts_left}`
+            : "❌ Неверный пароль");
+        el.pinError.classList.remove("hidden");
+      }
       return false;
     } catch {
+      el.btnSubmitPin.disabled = false;
       return false;
     }
   }
@@ -960,7 +1092,7 @@
   el.btnExportCsv.addEventListener("click", async () => {
     try {
       const headers = {};
-      if (prefs.pin) headers["X-Board-Pin"] = prefs.pin;
+      if (prefs.token) headers["X-Board-Token"] = prefs.token;
       const resp = await fetch("/api/export.csv", { headers });
       if (resp.status === 403) {
         pinVerified = false;
@@ -1023,8 +1155,8 @@
   el.btnPinLock.addEventListener("click", () => {
     if (pinVerified) {
       pinVerified = false;
-      prefs.pin = "";
-      localStorage.removeItem("sq_pin");
+      prefs.token = "";
+      localStorage.removeItem("sq_token");
       updateLockUI();
       if (boardState) renderQueueList(boardState);
       showToast("🔒 Управление заблокировано");
@@ -1033,20 +1165,31 @@
     }
   });
 
+  el.btnTogglePinVis.addEventListener("click", () => {
+    setPinVisibility(el.inputPin.type === "password");
+    el.inputPin.focus();
+  });
+
   el.btnSubmitPin.addEventListener("click", () => verifyPin(el.inputPin.value.trim(), false));
   el.inputPin.addEventListener("keydown", (ev) => {
-    if (ev.key === "Enter") verifyPin(el.inputPin.value.trim(), false);
+    if (ev.key === "Enter" && !el.btnSubmitPin.disabled) {
+      verifyPin(el.inputPin.value.trim(), false);
+    }
   });
 
   document.querySelectorAll("[data-close-modal]").forEach((btn) => {
     btn.addEventListener("click", () => {
       document.getElementById(btn.dataset.closeModal)?.classList.add("hidden");
+      if (btn.dataset.closeModal === "pinModal") setPinVisibility(false);
     });
   });
 
   document.querySelectorAll(".modal-backdrop").forEach((backdrop) => {
     backdrop.addEventListener("click", (ev) => {
-      if (ev.target === backdrop) backdrop.classList.add("hidden");
+      if (ev.target === backdrop) {
+        backdrop.classList.add("hidden");
+        if (backdrop.id === "pinModal") setPinVisibility(false);
+      }
     });
   });
 
@@ -1101,8 +1244,10 @@
       // Clean ?pin=... from address bar so students looking at the projector don't see it
       const cleanUrl = window.location.pathname + window.location.hash;
       window.history.replaceState({}, "", cleanUrl);
-    } else if (prefs.pin) {
-      await verifyPin(prefs.pin, true);
+    } else if (prefs.token) {
+      await verifySessionToken(prefs.token);
+    } else if (legacySavedPin) {
+      await verifyPin(legacySavedPin, true);
     }
 
     // Initial HTTP snapshot + live WebSocket

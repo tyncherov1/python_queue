@@ -305,9 +305,25 @@
       </div>
       <div class="modal-body">
         <div class="form-group">
-          <label for="inputPin">Введите PIN-код доски</label>
-          <input id="inputPin" type="password" inputmode="numeric" autocomplete="off" placeholder="••••" />
-          <div id="pinError" class="form-error hidden">Неверный PIN-код</div>
+          <label for="inputPin">Введите пароль / PIN-код доски</label>
+          <div class="password-field">
+            <input
+              id="inputPin"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Введите пароль..."
+            />
+            <button
+              id="btnTogglePinVis"
+              class="password-toggle"
+              type="button"
+              title="Показать пароль"
+              aria-label="Показать пароль"
+              aria-pressed="false"
+            >👁</button>
+          </div>
+          <div id="pinError" class="form-error hidden">Неверный пароль</div>
         </div>
       </div>
       <div class="modal-footer">

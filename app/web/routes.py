@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import io
 import logging
 from pathlib import Path
@@ -16,10 +17,11 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from app.queue_service import QueueService
+from app.queue_service import QueueService, format_duration_ru
+from app.security import PinBruteForceGuard, SlidingWindowRateLimiter, get_client_ip
 
 logger = logging.getLogger(__name__)
 
@@ -59,21 +61,84 @@ class ClearQueuePayload(BaseModel):
 
 class PinVerifyPayload(BaseModel):
     pin: str = ""
+    token: str = ""
 
 
 def _get_service(request: Request) -> QueueService:
     return request.app.state.queue_service
 
 
-def _require_board_pin(
+async def _enforce_rate_limit(request: Request) -> None:
+    limiter: SlidingWindowRateLimiter = request.app.state.rate_limiter
+    ip = get_client_ip(request)
+    allowed, retry_after = await limiter.allow(ip)
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Слишком много запросов. Подождите немного и попробуйте снова.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+
+async def _alert_lockout(request: Request, ip: str, retry_after_sec: int) -> None:
+    svc: QueueService = request.app.state.queue_service
+    cfg = request.app.state.settings
+    logger.warning(
+        "SECURITY: IP %s locked out for %ds after %d failed board PIN attempts",
+        ip,
+        retry_after_sec,
+        cfg.pin_max_attempts,
+    )
+    await svc.notify_admins(
+        "🚨 <b>Защита сайта: попытка подбора пароля!</b>\n\n"
+        f"🌐 IP: <code>{html.escape(ip)}</code>\n"
+        f"❌ Неверных попыток подряд: <b>{cfg.pin_max_attempts}</b>\n"
+        f"🔒 Ввод пароля для этого IP заблокирован на <b>{format_duration_ru(retry_after_sec)}</b>."
+    )
+
+
+async def _require_board_pin(
     request: Request,
     x_board_pin: str | None = Header(default=None),
+    x_board_token: str | None = Header(default=None),
 ) -> None:
+    await _enforce_rate_limit(request)
     expected = request.app.state.settings.board_pin
     if not expected:
         return
-    if (x_board_pin or "").strip() != expected:
-        raise HTTPException(status_code=403, detail="Неверный или отсутствующий PIN-код доски")
+
+    guard: PinBruteForceGuard = request.app.state.pin_guard
+    ip = get_client_ip(request)
+
+    locked_rem = await guard.check_lockout(ip)
+    if locked_rem > 0:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Слишком много неверных попыток. Повторите через {format_duration_ru(locked_rem)}.",
+            headers={"Retry-After": str(locked_rem)},
+        )
+
+    if x_board_token and guard.verify_session_token(x_board_token, expected):
+        return
+
+    if x_board_pin is not None:
+        if guard.verify_pin_constant_time(x_board_pin.strip(), expected):
+            await guard.record_success(ip)
+            return
+        just_locked, attempts_left, retry_after_sec = await guard.record_failure(ip)
+        if just_locked:
+            await _alert_lockout(request, ip, retry_after_sec)
+            raise HTTPException(
+                status_code=429,
+                detail=f"Слишком много неверных попыток. Доступ заблокирован на {format_duration_ru(retry_after_sec)}.",
+                headers={"Retry-After": str(retry_after_sec)},
+            )
+        raise HTTPException(
+            status_code=403,
+            detail=f"Неверный пароль доски (осталось попыток: {attempts_left})",
+        )
+
+    raise HTTPException(status_code=403, detail="Требуется пароль преподавателя")
 
 
 # ----------------------------------------------------------------------
@@ -113,12 +178,90 @@ async def api_list_students(
     return [s.to_dict() for s in students]
 
 
+@router.get("/api/pin/status")
+async def api_pin_status(request: Request) -> dict[str, Any]:
+    await _enforce_rate_limit(request)
+    expected = request.app.state.settings.board_pin
+    guard: PinBruteForceGuard = request.app.state.pin_guard
+    ip = get_client_ip(request)
+    locked_rem = await guard.check_lockout(ip) if expected else 0
+    return {
+        "pin_required": bool(expected),
+        "locked": locked_rem > 0,
+        "retry_after_sec": locked_rem,
+    }
+
+
 @router.post("/api/pin/verify")
-async def api_verify_pin(payload: PinVerifyPayload, request: Request) -> dict[str, bool]:
+async def api_verify_pin(payload: PinVerifyPayload, request: Request) -> Response:
+    await _enforce_rate_limit(request)
     expected = request.app.state.settings.board_pin
     if not expected:
-        return {"valid": True, "pin_required": False}
-    return {"valid": payload.pin.strip() == expected, "pin_required": True}
+        return JSONResponse({"valid": True, "pin_required": False, "locked": False})
+
+    guard: PinBruteForceGuard = request.app.state.pin_guard
+    ip = get_client_ip(request)
+
+    locked_rem = await guard.check_lockout(ip)
+    if locked_rem > 0:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "valid": False,
+                "pin_required": True,
+                "locked": True,
+                "retry_after_sec": locked_rem,
+                "attempts_left": 0,
+                "detail": f"Слишком много неверных попыток. Повторите через {format_duration_ru(locked_rem)}.",
+            },
+            headers={"Retry-After": str(locked_rem)},
+        )
+
+    # Silent session token validation (does not count as a password guess if expired)
+    if payload.token and not payload.pin:
+        if guard.verify_session_token(payload.token, expected):
+            return JSONResponse({"valid": True, "pin_required": True, "locked": False})
+        return JSONResponse({"valid": False, "pin_required": True, "locked": False})
+
+    candidate = payload.pin.strip()
+    if guard.verify_pin_constant_time(candidate, expected):
+        await guard.record_success(ip)
+        session_token = guard.create_session_token(expected)
+        return JSONResponse(
+            {
+                "valid": True,
+                "pin_required": True,
+                "locked": False,
+                "token": session_token,
+            }
+        )
+
+    just_locked, attempts_left, retry_after_sec = await guard.record_failure(ip)
+    if just_locked:
+        await _alert_lockout(request, ip, retry_after_sec)
+        return JSONResponse(
+            status_code=429,
+            content={
+                "valid": False,
+                "pin_required": True,
+                "locked": True,
+                "retry_after_sec": retry_after_sec,
+                "attempts_left": 0,
+                "detail": f"Слишком много неверных попыток. Ввод пароля заблокирован на {format_duration_ru(retry_after_sec)}.",
+            },
+            headers={"Retry-After": str(retry_after_sec)},
+        )
+
+    return JSONResponse(
+        {
+            "valid": False,
+            "pin_required": True,
+            "locked": False,
+            "attempts_left": attempts_left,
+            "retry_after_sec": 0,
+            "detail": f"Неверный пароль. Осталось попыток: {attempts_left}",
+        }
+    )
 
 
 @router.get("/api/qr.svg")
@@ -140,7 +283,16 @@ async def api_bot_qr(svc: QueueService = Depends(_get_service)) -> Response:
 @router.websocket("/ws")
 async def websocket_board(websocket: WebSocket) -> None:
     svc: QueueService = websocket.app.state.queue_service
-    await svc.ws_manager.connect(websocket)
+    peer = websocket.client.host if websocket.client else "unknown"
+    client_ip = (
+        websocket.headers.get("cf-connecting-ip", "").strip()
+        or websocket.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        or peer
+    ) if peer in {"127.0.0.1", "::1", "localhost", "testclient"} else peer
+
+    accepted = await svc.ws_manager.connect(websocket, client_ip=client_ip)
+    if not accepted:
+        return
     try:
         # Immediately send full state snapshot on connect
         snapshot = await svc.get_board_snapshot()

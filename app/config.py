@@ -55,6 +55,8 @@ class Settings:
     max_active_slots: int = 2
     board_visible_queue: int = 7
     board_pin: str = ""
+    pin_max_attempts: int = 5
+    pin_lockout_minutes: int = 15
 
     students_csv: Path = field(default_factory=lambda: BASE_DIR / "students.csv")
     db_path: Path = field(default_factory=lambda: BASE_DIR / "data" / "queue.db")
@@ -123,6 +125,8 @@ def load_settings(env_path: Path | None = None) -> Settings:
         max_active_slots=_parse_int("MAX_ACTIVE_SLOTS", 2, minimum=0),
         board_visible_queue=_parse_int("BOARD_VISIBLE_QUEUE", 7, minimum=1),
         board_pin=os.getenv("BOARD_PIN", "").strip(),
+        pin_max_attempts=_parse_int("PIN_MAX_ATTEMPTS", 5, minimum=1),
+        pin_lockout_minutes=_parse_int("PIN_LOCKOUT_MINUTES", 15, minimum=1),
         students_csv=csv_path,
         db_path=db_path,
         host=os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0",

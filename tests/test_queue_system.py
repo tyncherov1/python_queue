@@ -589,3 +589,98 @@ def test_web_export_csv_and_undo_endpoints(tmp_path: Path) -> None:
         assert "text/csv" in csv_r.headers["content-type"]
         assert "Первый Ученик" in csv_r.content.decode("utf-8-sig")
 
+
+def test_security_bruteforce_lockout_hmac_token_headers_and_alert(tmp_path: Path) -> None:
+    cfg = _make_settings(
+        tmp_path,
+        board_pin="SuperSecret2026!",
+        pin_max_attempts=3,
+        pin_lockout_minutes=15,
+    )
+    app = create_app(cfg, start_bot=False)
+
+    alerts: list[tuple[int, str]] = []
+
+    async def fake_notifier(tg_id: int, text: str) -> None:
+        alerts.append((tg_id, text))
+
+    with TestClient(app) as client:
+        # Speed up artificial sleep during unit tests while keeping real guard logic intact
+        app.state.pin_guard.failure_delay_step = 0.0
+        app.state.queue_service.set_notifier(fake_notifier)
+
+        # 1. Security headers present, /docs hidden when BOARD_PIN is set, eye toggle in HTML
+        home = client.get("/")
+        assert home.status_code == 200
+        assert "btnTogglePinVis" in home.text
+        assert home.headers["x-frame-options"] == "DENY"
+        assert home.headers["x-content-type-options"] == "nosniff"
+        assert home.headers["referrer-policy"] == "no-referrer"
+        assert "content-security-policy" in home.headers
+        assert client.get("/docs").status_code == 404
+
+        # 2. Attacker IP makes 3 wrong password guesses -> locked out for 15 minutes (HTTP 429)
+        attacker_hdrs = {"CF-Connecting-IP": "203.0.113.55"}
+        r1 = client.post("/api/pin/verify", json={"pin": "wrong1"}, headers=attacker_hdrs)
+        assert r1.status_code == 200
+        assert r1.json()["valid"] is False
+        assert r1.json()["attempts_left"] == 2
+
+        r2 = client.post("/api/pin/verify", json={"pin": "wrong2"}, headers=attacker_hdrs)
+        assert r2.status_code == 200
+        assert r2.json()["attempts_left"] == 1
+
+        r3 = client.post("/api/pin/verify", json={"pin": "wrong3"}, headers=attacker_hdrs)
+        assert r3.status_code == 429
+        assert r3.json()["locked"] is True
+        assert r3.json()["retry_after_sec"] >= 895
+        assert int(r3.headers["retry-after"]) >= 895
+
+        # Admin got a Telegram security alert!
+        assert any(tg_id == 999001 and "203.0.113.55" in txt for tg_id, txt in alerts)
+
+        # Even if attacker tries the RIGHT password during lockout -> still 429!
+        r4 = client.post("/api/pin/verify", json={"pin": "SuperSecret2026!"}, headers=attacker_hdrs)
+        assert r4.status_code == 429
+
+        # Direct API bypass attempt from locked IP -> also 429!
+        r_direct = client.post(
+            "/api/queue/insert",
+            json={"custom_name": "Hacker"},
+            headers={**attacker_hdrs, "X-Board-Pin": "SuperSecret2026!"},
+        )
+        assert r_direct.status_code == 429
+
+        # Lockout status endpoint reports locked for attacker
+        st_att = client.get("/api/pin/status", headers=attacker_hdrs).json()
+        assert st_att["locked"] is True and st_att["retry_after_sec"] > 0
+
+        # 3. Legitimate teacher from another IP logs in -> gets signed HMAC token (not raw PIN!)
+        teacher_hdrs = {"CF-Connecting-IP": "198.51.100.10"}
+        ok_login = client.post(
+            "/api/pin/verify",
+            json={"pin": "SuperSecret2026!"},
+            headers=teacher_hdrs,
+        )
+        assert ok_login.status_code == 200
+        body = ok_login.json()
+        assert body["valid"] is True
+        token = body["token"]
+        assert token and "SuperSecret2026!" not in token
+
+        # Signed X-Board-Token authenticates protected endpoints cleanly!
+        ins_ok = client.post(
+            "/api/queue/insert",
+            json={"custom_name": "Иванов Иван"},
+            headers={**teacher_hdrs, "X-Board-Token": token},
+        )
+        assert ins_ok.status_code == 200
+
+        # Tampered token is rejected with 403
+        ins_bad = client.post(
+            "/api/queue/insert",
+            json={"custom_name": "Fake"},
+            headers={**teacher_hdrs, "X-Board-Token": token[:-4] + "0000"},
+        )
+        assert ins_bad.status_code == 403
+
