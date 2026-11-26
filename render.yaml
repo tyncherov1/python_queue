@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: seminar-queue
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: BOT_MODE
+        value: webhook
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+      - key: BOARD_PIN
+        value: "1234"
+      - key: DEFAULT_TIMER_MINUTES
+        value: "7"
+      - key: REJOIN_COOLDOWN_MINUTES
+        value: "15"
+      - key: SEMINAR_TITLE
+        value: "Семинар • Очередь к преподавателю"

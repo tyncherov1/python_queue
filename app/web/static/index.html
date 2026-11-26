@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Семинар • Очередь к преподавателю</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@600;700;800&display=swap"
+    rel="stylesheet"
+  />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body data-timer-phase="idle">
+  <div class="ambient-glow" aria-hidden="true"></div>
+  <div id="alarmFlash" class="alarm-flash" aria-hidden="true"></div>
+
+  <div class="app-shell">
+    <!-- Top Header -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <div id="connBadge" class="conn-badge connecting" title="Состояние подключения к серверу">
+          <span class="conn-dot"></span>
+          <span id="connLabel">Подключение...</span>
+        </div>
+        <h1 id="seminarTitle" class="seminar-title">Семинар • Очередь к преподавателю</h1>
+        <span id="queueOpenBadge" class="status-pill open">Запись открыта</span>
+      </div>
+
+      <div class="topbar-right">
+        <div id="wallClock" class="wall-clock" aria-label="Текущее время">--:--</div>
+
+        <button id="btnSoundToggle" class="icon-btn" title="Включить / выключить звук звонка (M)">
+          <span id="soundIcon">🔔</span>
+        </button>
+
+        <button id="btnTestBell" class="icon-btn" title="Проверить звонок">
+          <span>🔊</span>
+        </button>
+
+        <button id="btnPinLock" class="icon-btn hidden" title="Управление защитой PIN-кодом">
+          <span id="pinLockIcon">🔒</span>
+        </button>
+
+        <button id="btnSettings" class="icon-btn" title="Настройки таймера и доски">
+          <span>⚙️</span>
+        </button>
+
+        <button id="btnFullscreen" class="icon-btn" title="Полноэкранный режим (F)">
+          <span>⛶</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main 2-Column Electronic Whiteboard Layout -->
+    <main class="board-grid">
+      <!-- LEFT STAGE: Active Student + Giant Timer + Controls -->
+      <section class="stage-panel">
+        <div class="speaker-header">
+          <div id="speakerBadge" class="speaker-badge idle">ОЖИДАНИЕ</div>
+          <div id="speakerMeta" class="speaker-meta"></div>
+        </div>
+
+        <div id="currentStudentName" class="current-student empty">
+          Нажмите «Вызвать первого», чтобы начать
+        </div>
+
+        <!-- Giant Circular Countdown Timer -->
+        <div class="timer-wrapper">
+          <svg class="timer-svg" viewBox="0 0 320 320" aria-hidden="true">
+            <circle class="timer-track" cx="160" cy="160" r="142"></circle>
+            <circle id="timerProgress" class="timer-progress" cx="160" cy="160" r="142"></circle>
+          </svg>
+          <div class="timer-center">
+            <div id="timerDisplay" class="timer-digits">07:00</div>
+            <div id="timerSublabel" class="timer-sublabel">Нажмите «Старт»</div>
+          </div>
+        </div>
+
+        <!-- Touch-Friendly Primary Controls -->
+        <div id="controlsPanel" class="controls-container">
+          <div class="controls-primary">
+            <button id="btnStartPause" class="btn btn-start" type="button">
+              <span class="btn-icon" id="startPauseIcon">▶</span>
+              <span id="startPauseText">Старт</span>
+            </button>
+
+            <button id="btnNext" class="btn btn-next" type="button">
+              <span class="btn-icon">⏭</span>
+              <span id="nextBtnText">Следующий человек</span>
+            </button>
+          </div>
+
+          <div class="controls-secondary">
+            <button id="btnAddMinute" class="btn btn-ghost" type="button" title="Добавить 1 минуту (+)">
+              +1 мин
+            </button>
+            <button id="btnResetTimer" class="btn btn-ghost" type="button" title="Сбросить таймер (R)">
+              ↺ Сброс
+            </button>
+          </div>
+        </div>
+
+        <!-- Read-only Banner when PIN locked -->
+        <div id="lockedBanner" class="locked-banner hidden">
+          <span>🔒 Режим просмотра. Чтобы управлять таймером и очередью, введите PIN преподавателя.</span>
+          <button id="btnUnlockFromBanner" class="btn btn-small btn-primary" type="button">Разблокировать</button>
+        </div>
+
+        <!-- Footer Stats & Keyboard Shortcuts -->
+        <footer class="stage-footer">
+          <div id="statsBar" class="stats-bar">
+            <span>Ответили: <strong id="statServed">0</strong></span>
+            <span class="dot-sep">•</span>
+            <span>Среднее время: <strong id="statAvg">—</strong></span>
+            <span class="dot-sep">•</span>
+            <span>В списке: <strong id="statRoster">32</strong></span>
+          </div>
+          <div class="shortcuts-hint">
+            <span><kbd>Space</kbd> Старт/Пауза</span>
+            <span><kbd>Enter</kbd> Следующий</span>
+            <span><kbd>+</kbd> +1 мин</span>
+            <span><kbd>R</kbd> Сброс</span>
+            <span><kbd>F</kbd> Полный экран</span>
+          </div>
+        </footer>
+      </section>
+
+      <!-- RIGHT SIDEBAR: Upcoming Queue + Quick Edit + Telegram QR -->
+      <aside class="queue-sidebar">
+        <div class="sidebar-header">
+          <div class="sidebar-title-group">
+            <h2>Очередь</h2>
+            <span id="queueCountPill" class="count-pill">0 чел.</span>
+          </div>
+          <div class="sidebar-actions">
+            <button id="btnToggleEdit" class="icon-btn small" title="Редактировать очередь с доски (добавить / переместить / удалить)">
+              ✏️
+            </button>
+          </div>
+        </div>
+
+        <!-- Quick Add Bar (shown only when edit mode is toggled on) -->
+        <div id="boardEditBar" class="board-edit-bar hidden">
+          <button id="btnOpenAddModal" class="btn btn-small btn-primary full-width" type="button">
+            ➕ Добавить ученика в очередь
+          </button>
+        </div>
+
+        <!-- Queue List -->
+        <div id="queueList" class="queue-list" role="list"></div>
+
+        <button id="btnShowMore" class="show-more-btn hidden" type="button"></button>
+
+        <!-- Bottom QR Card / Demo Mode Helper -->
+        <div id="qrCard" class="qr-card hidden">
+          <div class="qr-image-wrap">
+            <img id="qrImage" src="" alt="QR-код Telegram-бота" />
+          </div>
+          <div class="qr-info">
+            <div class="qr-title">Запись через Telegram</div>
+            <div id="qrBotHandle" class="qr-handle">@bot</div>
+            <div class="qr-hint">Отсканируйте камерой и нажмите «Записаться»</div>
+          </div>
+        </div>
+
+        <div id="demoCard" class="demo-card hidden">
+          <div class="demo-card-text">
+            <strong>Демо-режим (без BOT_TOKEN)</strong>
+            <span>Добавьте тестовых учеников, чтобы проверить доску и таймер</span>
+          </div>
+          <button id="btnDemoAdd" class="btn btn-small btn-primary" type="button">+ Тестовый ученик</button>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settingsModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="settingsTitle">⚙️ Настройки семинара и таймера</h3>
+        <button class="modal-close" data-close-modal="settingsModal" type="button">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="inputTimerMin">Время таймера на ученика (минуты)</label>
+          <div class="preset-chips" id="timerPresetChips">
+            <button type="button" class="chip" data-min="3">3 мин</button>
+            <button type="button" class="chip" data-min="5">5 мин</button>
+            <button type="button" class="chip" data-min="7">7 мин</button>
+            <button type="button" class="chip" data-min="10">10 мин</button>
+            <button type="button" class="chip" data-min="12">12 мин</button>
+            <button type="button" class="chip" data-min="15">15 мин</button>
+          </div>
+          <input id="inputTimerMin" type="number" step="0.5" min="0.5" max="120" value="7" />
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="inputCooldownMin">Кулдаун между записями (мин)</label>
+            <input id="inputCooldownMin" type="number" min="0" max="240" value="15" />
+          </div>
+          <div class="form-group">
+            <label for="inputVisibleCount">Показано в очереди справа</label>
+            <input id="inputVisibleCount" type="number" min="1" max="32" value="7" />
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="inputSeminarTitle">Заголовок на доске</label>
+          <input id="inputSeminarTitle" type="text" maxlength="120" />
+        </div>
+
+        <div class="toggle-list">
+          <label class="toggle-row">
+            <span>Запись в очередь открыта (в боте)</span>
+            <input id="toggleQueueOpen" type="checkbox" checked />
+          </label>
+          <label class="toggle-row">
+            <span>Автостарт таймера при нажатии «Следующий»</span>
+            <input id="toggleAutoStart" type="checkbox" />
+          </label>
+          <label class="toggle-row">
+            <span>Мягкий сигнал за 1 минуту до конца</span>
+            <input id="toggleOneMinWarn" type="checkbox" checked />
+          </label>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="selectAlarmSound">Мелодия звонка</label>
+            <select id="selectAlarmSound">
+              <option value="bell">🔔 Классический звонок</option>
+              <option value="chime">🎵 Мягкий гонг</option>
+              <option value="beep">📟 Тройной сигнал</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="inputVolume">Громкость (<span id="volumeVal">85</span>%)</label>
+            <input id="inputVolume" type="range" min="10" max="100" value="85" />
+          </div>
+        </div>
+
+        <div class="danger-zone">
+          <button id="btnModalTestBell" class="btn btn-small btn-ghost" type="button">🔊 Проверить звонок</button>
+          <button id="btnClearQueue" class="btn btn-small btn-danger" type="button">🧹 Очистить очередь</button>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-small btn-ghost" data-close-modal="settingsModal" type="button">Отмена</button>
+        <button id="btnSaveSettings" class="btn btn-small btn-primary" type="button">Сохранить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Student Modal (Board Quick Admin) -->
+  <div id="addStudentModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>➕ Добавить ученика в очередь</h3>
+        <button class="modal-close" data-close-modal="addStudentModal" type="button">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="selectRosterStudent">Выбрать из списка группы</label>
+          <select id="selectRosterStudent">
+            <option value="">— Выберите ученика —</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="inputCustomStudent">Или ввести имя вручную</label>
+          <input id="inputCustomStudent" type="text" placeholder="Например: Иванов Иван" maxlength="80" />
+        </div>
+        <div class="form-group">
+          <label for="inputInsertPos">Позиция в очереди (пусто — в конец)</label>
+          <input id="inputInsertPos" type="number" min="1" placeholder="1 = в начало, 2 = вторым..." />
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-small btn-ghost" data-close-modal="addStudentModal" type="button">Отмена</button>
+        <button id="btnConfirmAddStudent" class="btn btn-small btn-primary" type="button">Добавить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- PIN Unlock Modal -->
+  <div id="pinModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-card modal-compact">
+      <div class="modal-header">
+        <h3>🔒 Вход преподавателя</h3>
+        <button class="modal-close" data-close-modal="pinModal" type="button">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="inputPin">Введите PIN-код доски</label>
+          <input id="inputPin" type="password" inputmode="numeric" autocomplete="off" placeholder="••••" />
+          <div id="pinError" class="form-error hidden">Неверный PIN-код</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-small btn-ghost" data-close-modal="pinModal" type="button">Отмена</button>
+        <button id="btnSubmitPin" class="btn btn-small btn-primary" type="button">Разблокировать</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div id="toastContainer" class="toast-container" aria-live="polite"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
