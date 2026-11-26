@@ -152,6 +152,7 @@ class Database:
             "timer_epoch": "1",
             "rejoin_cooldown_minutes": str(self.settings.rejoin_cooldown_minutes),
             "cancel_cooldown_minutes": str(self.settings.cancel_cooldown_minutes),
+            "max_active_slots": str(self.settings.max_active_slots),
             "queue_open": "1",
             "auto_start_timer": "0",
             "board_visible_queue": str(self.settings.board_visible_queue),
@@ -585,3 +586,45 @@ class Database:
             "recent_done": recent_done,
             "roster_count": roster_count,
         }
+
+    async def get_history_entries(self) -> list[QueueEntry]:
+        cur = await self.conn.execute(
+            """
+            SELECT q.*, COALESCE(s.visits_count, 0) AS visits_count
+            FROM queue_entries q
+            LEFT JOIN students s ON s.id = q.student_id
+            ORDER BY q.joined_at ASC, q.id ASC
+            """
+        )
+        return [self._row_to_entry(r) for r in await cur.fetchall()]
+
+    async def get_last_done_entry(self) -> QueueEntry | None:
+        cur = await self.conn.execute(
+            """
+            SELECT q.*, COALESCE(s.visits_count, 0) AS visits_count
+            FROM queue_entries q
+            LEFT JOIN students s ON s.id = q.student_id
+            WHERE q.status IN ('done', 'skipped')
+            ORDER BY q.finished_at DESC, q.id DESC
+            LIMIT 1
+            """
+        )
+        row = await cur.fetchone()
+        return self._row_to_entry(row) if row else None
+
+    async def list_notifiable_telegram_ids(self, scope: str = "queue") -> list[int]:
+        if scope == "all":
+            cur = await self.conn.execute(
+                """
+                SELECT DISTINCT telegram_id FROM students
+                WHERE active_in_roster = 1 AND telegram_id IS NOT NULL
+                """
+            )
+        else:
+            cur = await self.conn.execute(
+                """
+                SELECT DISTINCT telegram_id FROM queue_entries
+                WHERE status IN ('waiting', 'active') AND telegram_id IS NOT NULL
+                """
+            )
+        return [int(r["telegram_id"]) for r in await cur.fetchall()]

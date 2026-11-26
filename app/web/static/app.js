@@ -68,6 +68,7 @@
     statRoster: document.getElementById("statRoster"),
 
     queueCountPill: document.getElementById("queueCountPill"),
+    queueEtaPill: document.getElementById("queueEtaPill"),
     btnToggleEdit: document.getElementById("btnToggleEdit"),
     boardEditBar: document.getElementById("boardEditBar"),
     btnOpenAddModal: document.getElementById("btnOpenAddModal"),
@@ -82,6 +83,7 @@
     settingsModal: document.getElementById("settingsModal"),
     inputTimerMin: document.getElementById("inputTimerMin"),
     inputCooldownMin: document.getElementById("inputCooldownMin"),
+    inputMaxSlots: document.getElementById("inputMaxSlots"),
     inputVisibleCount: document.getElementById("inputVisibleCount"),
     inputSeminarTitle: document.getElementById("inputSeminarTitle"),
     toggleQueueOpen: document.getElementById("toggleQueueOpen"),
@@ -92,6 +94,8 @@
     volumeVal: document.getElementById("volumeVal"),
     timerPresetChips: document.getElementById("timerPresetChips"),
     btnModalTestBell: document.getElementById("btnModalTestBell"),
+    btnUndoCall: document.getElementById("btnUndoCall"),
+    btnExportCsv: document.getElementById("btnExportCsv"),
     btnClearQueue: document.getElementById("btnClearQueue"),
     btnSaveSettings: document.getElementById("btnSaveSettings"),
 
@@ -339,7 +343,19 @@
     }
 
     document.body.setAttribute("data-timer-phase", phase);
-    el.timerDisplay.textContent = formatMMSS(remaining);
+    const formatted = formatMMSS(remaining);
+    el.timerDisplay.textContent = formatted;
+
+    // Live countdown in browser tab title when timer is active
+    const baseTitle = boardState.seminar_title || "Семинар • Очередь";
+    if (timer.status === "running" && boardState.current) {
+      const icon = phase === "overtime" ? "🔔" : "⏱";
+      document.title = `${icon} ${formatted} — ${boardState.current.display_name}`;
+    } else if (timer.status === "paused" && boardState.current) {
+      document.title = `⏸ ${formatted} — ${boardState.current.display_name}`;
+    } else {
+      document.title = baseTitle;
+    }
 
     // Update radial SVG progress ring
     const ratio = Math.max(0, Math.min(1, remaining / duration));
@@ -397,6 +413,15 @@
     const visibleItems = queue.slice(0, visibleLimit);
 
     el.queueCountPill.textContent = `${queue.length} чел.`;
+    if (queue.length > 0) {
+      const totalMin = Math.round((queue.length * (state.timer.duration_sec || 420)) / 60);
+      const hrs = Math.floor(totalMin / 60);
+      const remMin = totalMin % 60;
+      el.queueEtaPill.textContent = hrs > 0 ? `~${hrs} ч ${remMin} м` : `~${totalMin} мин`;
+      el.queueEtaPill.classList.remove("hidden");
+    } else {
+      el.queueEtaPill.classList.add("hidden");
+    }
     el.queueList.innerHTML = "";
 
     if (queue.length === 0) {
@@ -729,6 +754,7 @@
     const minVal = Math.round((boardState.timer.duration_sec / 60) * 10) / 10;
     el.inputTimerMin.value = String(minVal);
     el.inputCooldownMin.value = String(boardState.rejoin_cooldown_minutes ?? 15);
+    el.inputMaxSlots.value = String(boardState.max_active_slots ?? 2);
     el.inputVisibleCount.value = String(boardState.board_visible_queue ?? 7);
     el.inputSeminarTitle.value = boardState.seminar_title || "";
     el.toggleQueueOpen.checked = Boolean(boardState.queue_open);
@@ -768,6 +794,7 @@
         seminar_title: el.inputSeminarTitle.value.trim(),
         timer_duration_sec: Math.round(minutes * 60),
         rejoin_cooldown_minutes: Math.max(0, parseInt(el.inputCooldownMin.value || "0", 10)),
+        max_active_slots: Math.max(0, parseInt(el.inputMaxSlots.value || "0", 10)),
         board_visible_queue: Math.max(1, Math.min(32, parseInt(el.inputVisibleCount.value || "7", 10))),
         queue_open: el.toggleQueueOpen.checked,
         auto_start_timer: el.toggleAutoStart.checked,
@@ -917,6 +944,44 @@
 
   el.inputTimerMin.addEventListener("input", () => {
     highlightPresetChip(el.inputTimerMin.value);
+  });
+
+  el.btnUndoCall.addEventListener("click", async () => {
+    try {
+      const res = await apiRequest("/api/queue/undo", "POST");
+      if (res.state) applyState(res.state);
+      el.settingsModal.classList.add("hidden");
+      showToast("↩️ Предыдущий ученик возвращён");
+    } catch (err) {
+      showToast(err.message);
+    }
+  });
+
+  el.btnExportCsv.addEventListener("click", async () => {
+    try {
+      const headers = {};
+      if (prefs.pin) headers["X-Board-Pin"] = prefs.pin;
+      const resp = await fetch("/api/export.csv", { headers });
+      if (resp.status === 403) {
+        pinVerified = false;
+        updateLockUI();
+        openPinModal();
+        return;
+      }
+      if (!resp.ok) throw new Error("Не удалось скачать отчёт");
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "seminar_report.csv";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      showToast("📥 Отчёт seminar_report.csv скачан");
+    } catch (err) {
+      showToast(err.message);
+    }
   });
 
   el.btnClearQueue.addEventListener("click", async () => {

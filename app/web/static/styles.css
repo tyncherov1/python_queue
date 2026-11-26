@@ -635,6 +635,17 @@ kbd {
   border: 1px solid rgba(99, 102, 241, 0.4);
 }
 
+.eta-pill {
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  background: rgba(56, 189, 248, 0.14);
+  color: #7dd3fc;
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  white-space: nowrap;
+}
+
 .board-edit-bar {
   display: flex;
   gap: 8px;
@@ -1033,9 +1044,10 @@ kbd {
 
 .danger-zone {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
   padding-top: 6px;
 }
 

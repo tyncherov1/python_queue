@@ -133,6 +133,7 @@
           <div class="sidebar-title-group">
             <h2>Очередь</h2>
             <span id="queueCountPill" class="count-pill">0 чел.</span>
+            <span id="queueEtaPill" class="eta-pill hidden" title="Ориентировочное время на всю очередь">~0 мин</span>
           </div>
           <div class="sidebar-actions">
             <button id="btnToggleEdit" class="icon-btn small" title="Редактировать очередь с доски (добавить / переместить / удалить)">
@@ -204,14 +205,20 @@
             <input id="inputCooldownMin" type="number" min="0" max="240" value="15" />
           </div>
           <div class="form-group">
-            <label for="inputVisibleCount">Показано в очереди справа</label>
-            <input id="inputVisibleCount" type="number" min="1" max="32" value="7" />
+            <label for="inputMaxSlots">Макс. мест на ученика (0 = ∞)</label>
+            <input id="inputMaxSlots" type="number" min="0" max="20" value="2" />
           </div>
         </div>
 
-        <div class="form-group">
-          <label for="inputSeminarTitle">Заголовок на доске</label>
-          <input id="inputSeminarTitle" type="text" maxlength="120" />
+        <div class="form-row">
+          <div class="form-group">
+            <label for="inputVisibleCount">Показано в очереди справа</label>
+            <input id="inputVisibleCount" type="number" min="1" max="32" value="7" />
+          </div>
+          <div class="form-group">
+            <label for="inputSeminarTitle">Заголовок на доске</label>
+            <input id="inputSeminarTitle" type="text" maxlength="120" />
+          </div>
         </div>
 
         <div class="toggle-list">
@@ -245,8 +252,10 @@
         </div>
 
         <div class="danger-zone">
-          <button id="btnModalTestBell" class="btn btn-small btn-ghost" type="button">🔊 Проверить звонок</button>
-          <button id="btnClearQueue" class="btn btn-small btn-danger" type="button">🧹 Очистить очередь</button>
+          <button id="btnModalTestBell" class="btn btn-small btn-ghost" type="button">🔊 Звонок</button>
+          <button id="btnUndoCall" class="btn btn-small btn-ghost" type="button" title="Отменить случайное нажатие «Следующий»">↩️ Вернуть</button>
+          <button id="btnExportCsv" class="btn btn-small btn-ghost" type="button">📥 Отчёт CSV</button>
+          <button id="btnClearQueue" class="btn btn-small btn-danger" type="button">🧹 Очистить</button>
         </div>
       </div>
 

@@ -7,7 +7,7 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from app.bot.keyboards import (
     BTN_ADMIN,
@@ -15,12 +15,14 @@ from app.bot.keyboards import (
     BTN_LEAVE,
     BTN_QUEUE,
     BTN_STATUS,
+    admin_broadcast_scope_keyboard,
     admin_clear_confirm_keyboard,
     admin_cooldown_presets_keyboard,
     admin_entry_actions_keyboard,
     admin_insert_position_keyboard,
     admin_main_keyboard,
     admin_manage_queue_keyboard,
+    admin_slots_presets_keyboard,
     admin_students_keyboard,
     admin_swap_target_keyboard,
     admin_timer_presets_keyboard,
@@ -39,6 +41,8 @@ async def _render_admin_home(queue_service: QueueService) -> tuple[str, Any]:
     waiting = snap.get("queue", [])
     timer_min = snap["timer"]["duration_sec"] / 60.0
     cd_min = snap["rejoin_cooldown_minutes"]
+    max_slots = snap.get("max_active_slots", 2)
+    slots_str = "∞" if max_slots == 0 else str(max_slots)
     open_str = "🟢 Открыта" if snap["queue_open"] else "🔒 Закрыта"
 
     preview_lines = []
@@ -53,12 +57,13 @@ async def _render_admin_home(queue_service: QueueService) -> tuple[str, Any]:
         f"🎙 Сейчас отвечает: <b>{curr_text}</b>\n"
         f"📋 В очереди: <b>{len(waiting)} чел.</b> ({open_str})\n"
         f"{preview}\n\n"
-        f"⏱ Таймер: <b>{timer_min:g} мин</b>  |  ⏳ Кулдаун: <b>{cd_min} мин</b>"
+        f"⏱ Таймер: <b>{timer_min:g} мин</b>  |  ⏳ Кулдаун: <b>{cd_min} мин</b>  |  🎟 Лимит: <b>{slots_str}</b>"
     )
     kb = admin_main_keyboard(
         queue_open=snap["queue_open"],
         timer_minutes=timer_min,
         cooldown_minutes=cd_min,
+        max_active_slots=max_slots,
     )
     return text, kb
 
@@ -769,6 +774,128 @@ async def cb_admin_stats(
     _, kb = await _render_admin_home(queue_service)
     await _safe_edit(callback, text, kb)
     await callback.answer()
+
+
+@router.callback_query(F.data == "adm:undo")
+async def cb_admin_undo(
+    callback: CallbackQuery,
+    student: Student,
+    queue_service: QueueService,
+) -> None:
+    if not _is_admin(student):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    res = await queue_service.undo_last_call()
+    text, kb = await _render_admin_home(queue_service)
+    await _safe_edit(callback, f"{res.message}\n\n{text}", kb)
+    await callback.answer("Отменено" if res.ok else "Нечего отменять")
+
+
+@router.callback_query(F.data == "adm:slots_menu")
+async def cb_admin_slots_menu(callback: CallbackQuery, student: Student) -> None:
+    if not _is_admin(student):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await _safe_edit(
+        callback,
+        "🎟 <b>Лимит одновременных мест в очереди</b>\n"
+        "Сколько раз один ученик может одновременно стоять в очереди:",
+        admin_slots_presets_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:set_slots:"))
+async def cb_admin_set_slots(
+    callback: CallbackQuery,
+    student: Student,
+    queue_service: QueueService,
+) -> None:
+    if not _is_admin(student):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    slots = int(callback.data.split(":")[2])
+    await queue_service.update_settings(max_active_slots=slots)
+    label = "без ограничений" if slots == 0 else f"{slots}"
+    text, kb = await _render_admin_home(queue_service)
+    await _safe_edit(callback, f"🎟 Лимит одновременных мест: <b>{label}</b>.\n\n{text}", kb)
+    await callback.answer("Лимит обновлён")
+
+
+@router.callback_query(F.data == "adm:bc_menu")
+async def cb_admin_bc_menu(callback: CallbackQuery, student: Student) -> None:
+    if not _is_admin(student):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    await _safe_edit(
+        callback,
+        "📢 <b>Рассылка объявления</b>\nКому отправить сообщение?",
+        admin_broadcast_scope_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:bc_scope:"))
+async def cb_admin_bc_scope(
+    callback: CallbackQuery,
+    student: Student,
+    state: FSMContext,
+) -> None:
+    if not _is_admin(student):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    scope = callback.data.split(":")[2]
+    await state.set_state(AdminStates.waiting_broadcast_text)
+    await state.update_data(bc_scope=scope)
+    target_txt = "всем ученикам группы" if scope == "all" else "тем, кто сейчас в очереди"
+    await _safe_edit(
+        callback,
+        f"✏️ Отправьте текст объявления ({target_txt}):\n<i>(или отправьте /cancel для отмены)</i>",
+    )
+    await callback.answer()
+
+
+@router.message(AdminStates.waiting_broadcast_text)
+async def fsm_broadcast_text(
+    message: Message,
+    student: Student,
+    queue_service: QueueService,
+    state: FSMContext,
+) -> None:
+    if not _is_admin(student):
+        return
+    body = (message.text or "").strip()
+    data = await state.get_data()
+    scope = data.get("bc_scope", "queue")
+    await state.clear()
+    if not body or body.startswith("/") or body in {BTN_JOIN, BTN_LEAVE, BTN_STATUS, BTN_QUEUE, BTN_ADMIN}:
+        await message.answer("❌ Рассылка отменена.")
+        return
+    delivered = await queue_service.broadcast_announcement(body, scope=scope)
+    text, kb = await _render_admin_home(queue_service)
+    await message.answer(
+        f"📢 Объявление отправлено: <b>{delivered} чел.</b>\n\n{text}",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data == "adm:export_csv")
+async def cb_admin_export_csv(
+    callback: CallbackQuery,
+    student: Student,
+    queue_service: QueueService,
+) -> None:
+    if not _is_admin(student):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    csv_bytes = await queue_service.export_history_csv()
+    doc = BufferedInputFile(csv_bytes, filename="seminar_report.csv")
+    if callback.message:
+        await callback.message.answer_document(
+            document=doc,
+            caption="📥 Отчёт по очереди семинара (открывается в Excel).",
+        )
+    await callback.answer("Отчёт отправлен")
 
 
 @router.callback_query(F.data == "adm:reload_csv")

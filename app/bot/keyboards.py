@@ -92,14 +92,16 @@ def admin_main_keyboard(
     queue_open: bool,
     timer_minutes: float,
     cooldown_minutes: int,
+    max_active_slots: int = 2,
 ) -> InlineKeyboardMarkup:
     open_label = "🔒 Закрыть запись" if queue_open else "🔓 Открыть запись"
     timer_str = f"{timer_minutes:g}"
+    slots_str = "∞" if max_active_slots == 0 else str(max_active_slots)
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="⏭ Следующий", callback_data="adm:next"),
-                InlineKeyboardButton(text="⏩ Пропустить", callback_data="adm:skip"),
+                InlineKeyboardButton(text="↩️ Вернуть назад", callback_data="adm:undo"),
             ],
             [
                 InlineKeyboardButton(text="➕ Добавить ученика", callback_data="adm:add_list:0"),
@@ -107,17 +109,22 @@ def admin_main_keyboard(
             ],
             [
                 InlineKeyboardButton(text=open_label, callback_data="adm:toggle_open"),
-                InlineKeyboardButton(text="🔄 Обновить", callback_data="adm:home"),
+                InlineKeyboardButton(text="📢 Объявление", callback_data="adm:bc_menu"),
             ],
             [
                 InlineKeyboardButton(text=f"⏱ Таймер ({timer_str} мин)", callback_data="adm:timer_menu"),
                 InlineKeyboardButton(text=f"⏳ Кулдаун ({cooldown_minutes} мин)", callback_data="adm:cd_menu"),
             ],
             [
+                InlineKeyboardButton(text=f"🎟 Лимит мест ({slots_str})", callback_data="adm:slots_menu"),
                 InlineKeyboardButton(text="📊 Статистика", callback_data="adm:stats"),
+            ],
+            [
+                InlineKeyboardButton(text="📥 Отчёт CSV", callback_data="adm:export_csv"),
                 InlineKeyboardButton(text="📄 Перечитать CSV", callback_data="adm:reload_csv"),
             ],
             [
+                InlineKeyboardButton(text="🔄 Обновить", callback_data="adm:home"),
                 InlineKeyboardButton(text="🧹 Очистить очередь", callback_data="adm:clear_prompt"),
             ],
         ]
@@ -304,6 +311,36 @@ def admin_cooldown_presets_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="✏️ Своё значение", callback_data="adm:cd_custom"),
                 InlineKeyboardButton(text="↩️ В меню", callback_data="adm:home"),
             ],
+        ]
+    )
+
+
+def admin_slots_presets_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="1 место", callback_data="adm:set_slots:1"),
+                InlineKeyboardButton(text="2 места", callback_data="adm:set_slots:2"),
+                InlineKeyboardButton(text="3 места", callback_data="adm:set_slots:3"),
+            ],
+            [
+                InlineKeyboardButton(text="∞ Без ограничений", callback_data="adm:set_slots:0"),
+            ],
+            [InlineKeyboardButton(text="↩️ В меню", callback_data="adm:home")],
+        ]
+    )
+
+
+def admin_broadcast_scope_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📋 Тем, кто в очереди", callback_data="adm:bc_scope:queue"),
+            ],
+            [
+                InlineKeyboardButton(text="👥 Всем ученикам группы", callback_data="adm:bc_scope:all"),
+            ],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="adm:home")],
         ]
     )
 

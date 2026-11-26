@@ -9,3 +9,4 @@ class AdminStates(StatesGroup):
     waiting_move_position = State()
     waiting_timer_minutes = State()
     waiting_cooldown_minutes = State()
+    waiting_broadcast_text = State()

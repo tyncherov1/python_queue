@@ -475,3 +475,93 @@ async def test_legacy_db_migrates_last_joined_at_column(tmp_path: Path) -> None:
     finally:
         await db.close()
 
+
+@pytest.mark.asyncio
+async def test_max_active_slots_undo_csv_export_and_broadcast(tmp_path: Path) -> None:
+    cfg = _make_settings(
+        tmp_path,
+        rejoin_cooldown_minutes=0,
+        cancel_cooldown_minutes=0,
+        max_active_slots=2,
+    )
+    db = Database(cfg)
+    await db.connect()
+    await db.sync_students_from_csv()
+    svc = QueueService(db=db, settings=cfg, ws_manager=WebSocketManager())
+
+    sent_messages: list[tuple[int, str]] = []
+
+    async def fake_notifier(tg_id: int, text: str) -> None:
+        sent_messages.append((tg_id, text))
+
+    svc.set_notifier(fake_notifier)
+
+    try:
+        st1 = await db.resolve_telegram_user(401, "student_01")
+        st2 = await db.resolve_telegram_user(402, "student_02")
+        st3 = await db.resolve_telegram_user(403, "student_03")
+        assert st1 and st2 and st3
+
+        # 1. Student 1 can occupy up to MAX_ACTIVE_SLOTS = 2 spots simultaneously
+        assert (await svc.join_queue(st1)).ok
+        assert (await svc.join_queue(st2)).ok
+        assert (await svc.join_queue(st1)).ok  # 2nd spot (#3)
+
+        # 3rd simultaneous spot is blocked!
+        third = await svc.join_queue(st1)
+        assert not third.ok
+        assert "максимум мест" in third.message
+
+        # 2. Broadcast announcement to queue vs full roster
+        sent_messages.clear()
+        n_queue = await svc.broadcast_announcement("Перерыв 5 минут", scope="queue")
+        assert n_queue == 2  # st1 and st2 are in queue (deduplicated!)
+        n_all = await svc.broadcast_announcement("Всем привет", scope="all")
+        assert n_all == 3  # st1, st2, st3 all bound telegram_id
+
+        # 3. Call next twice (st1 -> active, then st1 -> done & st2 -> active)
+        assert (await svc.call_next()).ok
+        assert (await svc.call_next()).ok
+        # Now st1 only has 1 open spot left, so they CAN join again!
+        assert (await svc.join_queue(st1)).ok
+
+        # 4. Undo accidental 'Next' -> st2 returns to #1 waiting, st1 returns to active!
+        undo_res = await svc.undo_last_call()
+        assert undo_res.ok
+        active_after_undo = await db.get_active_entry()
+        waiting_after_undo = await db.get_waiting_entries()
+        assert active_after_undo is not None and active_after_undo.student_id == st1.id
+        assert waiting_after_undo[0].student_id == st2.id
+
+        # 5. CSV export includes UTF-8 BOM & student names
+        csv_bytes = await svc.export_history_csv()
+        assert csv_bytes.startswith(b"\xef\xbb\xbf")
+        csv_text = csv_bytes.decode("utf-8-sig")
+        assert st1.full_name in csv_text
+        assert st2.full_name in csv_text
+    finally:
+        await db.close()
+
+
+def test_web_export_csv_and_undo_endpoints(tmp_path: Path) -> None:
+    cfg = _make_settings(tmp_path, board_pin="9999")
+    app = create_app(cfg, start_bot=False)
+    headers = {"X-Board-Pin": "9999"}
+
+    with TestClient(app) as client:
+        assert client.get("/api/export.csv").status_code == 403
+        client.post("/api/queue/insert", json={"custom_name": "Первый Ученик"}, headers=headers)
+        client.post("/api/queue/insert", json={"custom_name": "Второй Ученик"}, headers=headers)
+        client.post("/api/queue/next", headers=headers)
+        client.post("/api/queue/next", headers=headers)
+
+        undo_r = client.post("/api/queue/undo", headers=headers)
+        assert undo_r.status_code == 200
+        assert undo_r.json()["state"]["current"]["display_name"] == "Первый Ученик"
+        assert undo_r.json()["state"]["queue"][0]["display_name"] == "Второй Ученик"
+
+        csv_r = client.get("/api/export.csv", headers=headers)
+        assert csv_r.status_code == 200
+        assert "text/csv" in csv_r.headers["content-type"]
+        assert "Первый Ученик" in csv_r.content.decode("utf-8-sig")
+

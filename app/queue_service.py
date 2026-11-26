@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import datetime as dt
 import html
+import io
 import logging
 import math
 import time
@@ -102,6 +105,7 @@ class QueueService:
             "auto_start_timer": state.get("auto_start_timer", "0") == "1",
             "rejoin_cooldown_minutes": int(state.get("rejoin_cooldown_minutes", self.settings.rejoin_cooldown_minutes)),
             "cancel_cooldown_minutes": int(state.get("cancel_cooldown_minutes", self.settings.cancel_cooldown_minutes)),
+            "max_active_slots": int(state.get("max_active_slots", self.settings.max_active_slots)),
             "board_visible_queue": int(state.get("board_visible_queue", self.settings.board_visible_queue)),
             "current": active.to_dict() if active else None,
             "queue": [entry.to_dict() for entry in waiting],
@@ -134,6 +138,22 @@ class QueueService:
         now = time.time()
         rejoin_cd_min = int(state.get("rejoin_cooldown_minutes", self.settings.rejoin_cooldown_minutes))
         cancel_cd_min = int(state.get("cancel_cooldown_minutes", self.settings.cancel_cooldown_minutes))
+        max_slots = int(state.get("max_active_slots", self.settings.max_active_slots))
+
+        open_entries = await self.db.get_student_open_entries(fresh_student.id)
+        if max_slots > 0 and len(open_entries) >= max_slots:
+            pos_parts = [
+                "сейчас отвечаете" if e.status == "active" else f"#{e.position}"
+                for e in open_entries
+            ]
+            return ActionResult(
+                ok=False,
+                message=(
+                    f"🚫 Вы уже занимаете максимум мест в очереди (<b>{len(open_entries)} из {max_slots}</b>: "
+                    f"<b>{', '.join(pos_parts)}</b>).\n"
+                    "Когда подойдёт ваша очередь или вы отмените одну из записей, можно будет записаться снова."
+                ),
+            )
 
         # Check signup-to-signup cooldown (allows standing in queue twice once cooldown passes, e.g. #1 and #7)
         if rejoin_cd_min > 0 and fresh_student.last_joined_at is not None:
@@ -141,7 +161,6 @@ class QueueService:
             required = rejoin_cd_min * 60
             if elapsed < required:
                 remaining = math.ceil(required - elapsed)
-                open_entries = await self.db.get_student_open_entries(fresh_student.id)
                 pos_hint = ""
                 if open_entries:
                     pos_parts = [
@@ -175,10 +194,9 @@ class QueueService:
                 )
 
         waiting = await self.db.get_waiting_entries()
-        my_open = await self.db.get_student_open_entries(fresh_student.id)
         my_positions = [
             "сейчас отвечаете" if e.status == "active" else f"#{e.position}"
-            for e in my_open
+            for e in open_entries
         ]
         return ActionResult(
             ok=True,
@@ -888,6 +906,7 @@ class QueueService:
         timer_duration_sec: int | None = None,
         rejoin_cooldown_minutes: int | None = None,
         cancel_cooldown_minutes: int | None = None,
+        max_active_slots: int | None = None,
         queue_open: bool | None = None,
         auto_start_timer: bool | None = None,
         board_visible_queue: int | None = None,
@@ -913,6 +932,9 @@ class QueueService:
             if cancel_cooldown_minutes is not None:
                 updates["cancel_cooldown_minutes"] = max(0, min(120, int(cancel_cooldown_minutes)))
 
+            if max_active_slots is not None:
+                updates["max_active_slots"] = max(0, min(20, int(max_active_slots)))
+
             if queue_open is not None:
                 updates["queue_open"] = "1" if queue_open else "0"
 
@@ -926,6 +948,122 @@ class QueueService:
                 await self.db.set_state(updates)
 
         return await self._broadcast_state()
+
+    async def undo_last_call(self) -> ActionResult:
+        """Undo an accidental 'Next' tap: put current speaker back at #1 and restore previous speaker."""
+        async with self._lock:
+            active = await self.db.get_active_entry()
+            last_done = await self.db.get_last_done_entry()
+
+            if active is None and last_done is None:
+                return ActionResult(ok=False, message="ℹ️ Нечего отменять.")
+
+            waiting = await self.db.get_waiting_entries()
+            ordered_ids = [item.id for item in waiting]
+
+            # Move current active back to the front of waiting (#1)
+            if active is not None:
+                await self.db.conn.execute(
+                    "UPDATE queue_entries SET status = 'waiting', position = 1, started_at = NULL WHERE id = ?",
+                    (active.id,),
+                )
+                ordered_ids.insert(0, active.id)
+                await self.db.renumber_waiting(ordered_ids)
+
+            restored_name: str | None = None
+            if last_done is not None:
+                was_done = last_done.status == "done"
+                await self.db.conn.execute(
+                    "UPDATE queue_entries SET status = 'active', position = NULL, finished_at = NULL WHERE id = ?",
+                    (last_done.id,),
+                )
+                if was_done and last_done.student_id is not None:
+                    await self.db.conn.execute(
+                        "UPDATE students SET visits_count = MAX(0, visits_count - 1) WHERE id = ?",
+                        (last_done.student_id,),
+                    )
+                restored_name = last_done.display_name
+
+            duration = int(float(await self.db.get_state("timer_duration_sec", str(self.settings.default_timer_seconds))))
+            epoch = int(await self.db.get_state("timer_epoch", "1")) + 1
+            await self.db.set_state(
+                {
+                    "timer_status": "idle",
+                    "timer_remaining_sec": float(duration),
+                    "timer_started_at": "",
+                    "timer_epoch": epoch,
+                },
+                commit=False,
+            )
+            await self.db.conn.commit()
+
+        await self._broadcast_state()
+        if restored_name:
+            return ActionResult(
+                ok=True,
+                message=f"↩️ Возвращён предыдущий ученик: <b>{html.escape(restored_name)}</b>.",
+            )
+        return ActionResult(
+            ok=True,
+            message="↩️ Вызов отменён — ученик возвращён на позицию #1.",
+        )
+
+    async def export_history_csv(self) -> bytes:
+        """Generate an Excel-friendly UTF-8-BOM semicolon CSV report of the seminar queue."""
+        entries = await self.db.get_history_entries()
+        status_labels = {
+            "done": "Ответил(а)",
+            "active": "Сейчас отвечает",
+            "waiting": "В очереди",
+            "left": "Вышел(а) сам(а)",
+            "skipped": "Пропущен(а)",
+            "removed": "Удалён(а)",
+        }
+
+        def _fmt_ts(ts: float | None) -> str:
+            if ts is None:
+                return ""
+            return dt.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+
+        buf = io.StringIO()
+        writer = csv.writer(buf, delimiter=";")
+        writer.writerow(
+            ["№", "Ученик", "Статус", "Записался", "Начал отвечать", "Завершил", "Длительность (сек)"]
+        )
+        for idx, e in enumerate(entries, start=1):
+            dur = (
+                round(e.finished_at - e.started_at)
+                if e.started_at is not None and e.finished_at is not None
+                else ""
+            )
+            writer.writerow(
+                [
+                    idx,
+                    e.display_name,
+                    status_labels.get(e.status, e.status),
+                    _fmt_ts(e.joined_at),
+                    _fmt_ts(e.started_at),
+                    _fmt_ts(e.finished_at),
+                    dur,
+                ]
+            )
+        return ("\ufeff" + buf.getvalue()).encode("utf-8")
+
+    async def broadcast_announcement(self, text: str, scope: str = "queue") -> int:
+        """Send an admin announcement via Telegram to everyone in queue or the full roster."""
+        cleaned = text.strip()
+        if not cleaned or self._notifier is None:
+            return 0
+        recipients = await self.db.list_notifiable_telegram_ids(scope=scope)
+        payload = f"📢 <b>Объявление преподавателя:</b>\n\n{html.escape(cleaned)}"
+        sent = 0
+        for tg_id in recipients:
+            try:
+                await self._notifier(tg_id, payload)
+                sent += 1
+            except Exception as exc:
+                logger.debug("Broadcast failed for tg_id=%s: %s", tg_id, exc)
+        return sent
 
     async def reload_roster(self) -> int:
         async with self._lock:

@@ -52,6 +52,7 @@ class Settings:
     default_timer_minutes: float = 7.0
     rejoin_cooldown_minutes: int = 15
     cancel_cooldown_minutes: int = 2
+    max_active_slots: int = 2
     board_visible_queue: int = 7
     board_pin: str = ""
 
@@ -119,6 +120,7 @@ def load_settings(env_path: Path | None = None) -> Settings:
         default_timer_minutes=_parse_float("DEFAULT_TIMER_MINUTES", 7.0, minimum=0.5),
         rejoin_cooldown_minutes=_parse_int("REJOIN_COOLDOWN_MINUTES", 15, minimum=0),
         cancel_cooldown_minutes=_parse_int("CANCEL_COOLDOWN_MINUTES", 2, minimum=0),
+        max_active_slots=_parse_int("MAX_ACTIVE_SLOTS", 2, minimum=0),
         board_visible_queue=_parse_int("BOARD_VISIBLE_QUEUE", 7, minimum=1),
         board_pin=os.getenv("BOARD_PIN", "").strip(),
         students_csv=csv_path,

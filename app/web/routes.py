@@ -37,6 +37,7 @@ class SettingsUpdatePayload(BaseModel):
     timer_duration_sec: int | None = Field(default=None, ge=10, le=7200)
     rejoin_cooldown_minutes: int | None = Field(default=None, ge=0, le=1440)
     cancel_cooldown_minutes: int | None = Field(default=None, ge=0, le=120)
+    max_active_slots: int | None = Field(default=None, ge=0, le=20)
     queue_open: bool | None = None
     auto_start_timer: bool | None = None
     board_visible_queue: int | None = Field(default=None, ge=1, le=32)
@@ -277,6 +278,30 @@ async def api_queue_clear(
     return {"ok": res.ok, "message": res.message, "state": await svc.get_board_snapshot()}
 
 
+@router.post("/api/queue/undo")
+async def api_queue_undo(
+    svc: QueueService = Depends(_get_service),
+    _: None = Depends(_require_board_pin),
+) -> dict[str, Any]:
+    res = await svc.undo_last_call()
+    if not res.ok:
+        raise HTTPException(status_code=400, detail=res.message)
+    return {"ok": True, "message": res.message, "state": await svc.get_board_snapshot()}
+
+
+@router.get("/api/export.csv")
+async def api_export_csv(
+    svc: QueueService = Depends(_get_service),
+    _: None = Depends(_require_board_pin),
+) -> Response:
+    csv_bytes = await svc.export_history_csv()
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="seminar_report.csv"'},
+    )
+
+
 @router.patch("/api/settings")
 async def api_update_settings(
     payload: SettingsUpdatePayload,
@@ -288,6 +313,7 @@ async def api_update_settings(
         timer_duration_sec=payload.timer_duration_sec,
         rejoin_cooldown_minutes=payload.rejoin_cooldown_minutes,
         cancel_cooldown_minutes=payload.cancel_cooldown_minutes,
+        max_active_slots=payload.max_active_slots,
         queue_open=payload.queue_open,
         auto_start_timer=payload.auto_start_timer,
         board_visible_queue=payload.board_visible_queue,

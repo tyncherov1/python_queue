@@ -1,14 +1,27 @@
+# Python & virtual environments
 __pycache__/
 *.py[cod]
 *$py.class
 .venv/
 venv/
 env/
+.pytest_cache/
+
+# Secrets & environment files (keep .env.example as template)
 .env
+.env.*
+*.env
+!.env.example
+
+# Runtime database & logs
 data/
 *.db
 *.db-wal
 *.db-shm
-.pytest_cache/
+*.log
+
+# OS & editor files
 .DS_Store
 Thumbs.db
+.vscode/
+.idea/
